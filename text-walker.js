@@ -32,7 +32,10 @@ export const textWalker = function* (x, func, filterFunc) {
     const walker = document.createTreeWalker(root, filter, { acceptNode: filterFunc || acceptNode })
     const walk = x.commonAncestorContainer ? walkRange : walkDocument
     const nodes = walk(x, walker)
-    const strs = nodes.map(node => node.nodeValue)
+    // nodeValue is null for element nodes that wind up in `nodes` (the walk
+    // range can include the block root); join() already treats them as empty,
+    // but the segmenter reads `.length`, so normalise to '' here
+    const strs = nodes.map(node => node.nodeValue ?? '')
     const makeRange = (startIndex, startOffset, endIndex, endOffset) => {
         const range = document.createRange()
         range.setStart(nodes[startIndex], startOffset)

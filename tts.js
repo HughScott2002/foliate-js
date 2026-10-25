@@ -1,3 +1,5 @@
+import { narrationFilter, isSkippable } from './dom-stripper.js'
+
 const NS = {
     XML: 'http://www.w3.org/XML/1998/namespace',
     SSML: 'http://www.w3.org/2001/10/synthesis',
@@ -103,11 +105,18 @@ const getFragmentWithMarks = (range, textWalker, granularity) => {
     const segmenter = getSegmenter(lang, granularity)
     const fragment = range.cloneContents()
 
+    // Drop skippable subtrees (footnotes, noteref markers, pagebreak labels)
+    // from the clone: the walk filter below prunes their TEXT, but the SSML
+    // is serialized from the fragment markup, so the nodes must go too.
+    for (const el of [...fragment.querySelectorAll('*')])
+        if (isSkippable(el)) el.remove()
+
     // we need ranges on both the original document (for highlighting)
     // and the document fragment (for inserting marks)
     // so unfortunately need to do it twice, as you can't copy the ranges
-    const entries = [...textWalker(range, segmenter)]
-    const fragmentEntries = [...textWalker(fragment, segmenter)]
+    // the narration filter also prunes skippable subtrees from the walk
+    const entries = [...textWalker(range, segmenter, narrationFilter)]
+    const fragmentEntries = [...textWalker(fragment, segmenter, narrationFilter)]
 
     for (const [name, range] of fragmentEntries) {
         const mark = document.createElement('foliate-mark')
