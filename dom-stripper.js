@@ -348,6 +348,16 @@ export const skippableRoles = new Set([
 export const isSkippable = el =>
     extractNodeRoles(el).some(role => skippableRoles.has(role))
 
+// Whether a node is, or is inside, skippable content (walks the ancestor
+// chain). Needed where a range/clone boundary unwraps the element itself, so
+// isSkippable(el) cannot be checked on it directly.
+export const isInSkippable = node => {
+    const start = node?.nodeType === 1 ? node : node?.parentElement
+    for (let el = start; el; el = el.parentElement)
+        if (isSkippable(el)) return true
+    return false
+}
+
 // A TreeWalker acceptNode for narration: reject skippable elements (pruning
 // their whole subtree) and script/style, so footnotes, noteref markers and
 // pagebreak labels never reach the synthesizer. Everything else is walked

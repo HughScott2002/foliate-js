@@ -1,4 +1,4 @@
-import { narrationFilter, isSkippable } from './dom-stripper.js'
+import { narrationFilter, isSkippable, isInSkippable } from './dom-stripper.js'
 
 const NS = {
     XML: 'http://www.w3.org/XML/1998/namespace',
@@ -105,11 +105,23 @@ const getFragmentWithMarks = (range, textWalker, granularity) => {
     const segmenter = getSegmenter(lang, granularity)
     const fragment = range.cloneContents()
 
+    // A block that IS (or is inside) skippable content: cloneContents
+    // unwraps the range's boundary element, so the element itself is absent
+    // from the fragment and the per-element prune below cannot see it.
+    // Detect it on the live range and drop the whole block.
+    if (isInSkippable(range.startContainer))
+        return { entries: [], ssml: fragmentToSSML(
+            document.implementation.createDocument(NS.SSML, 'speak'),
+            { lang, alphabet }) }
+
     // Drop skippable subtrees (footnotes, noteref markers, pagebreak labels)
-    // from the clone: the walk filter below prunes their TEXT, but the SSML
-    // is serialized from the fragment markup, so the nodes must go too.
-    for (const el of [...fragment.querySelectorAll('*')])
-        if (isSkippable(el)) el.remove()
+    // and script/style from the clone: the walk filter below prunes their
+    // TEXT, but the SSML is serialized from the fragment markup, so the
+    // nodes must go too.
+    for (const el of [...fragment.querySelectorAll('*')]) {
+        const name = el.tagName.toLowerCase()
+        if (name === 'script' || name === 'style' || isSkippable(el)) el.remove()
+    }
 
     // we need ranges on both the original document (for highlighting)
     // and the document fragment (for inserting marks)
