@@ -94,7 +94,14 @@ const fragmentToSSML = (fragment, inherited) => {
         }
         return el
     }
-    convert(fragment.firstChild, ssml.documentElement, inherited.alphabet)
+    // Convert EVERY top-level child, not just the first: when a block range
+    // contains a nested block (a nested <ul>, say), cloneContents unwraps the
+    // block element, so the fragment starts with a bare text node — which the
+    // element recursion below does not append on its own.
+    for (let node = fragment.firstChild; node; node = node.nextSibling) {
+        const childEl = convert(node, ssml.documentElement, inherited.alphabet)
+        if (childEl && childEl !== ssml.documentElement) ssml.documentElement.append(childEl)
+    }
     return ssml
 }
 
