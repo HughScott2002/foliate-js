@@ -1,4 +1,4 @@
-import { narrationFilter, isSkippable, isInSkippable } from './dom-stripper.js'
+import { makeNarrationFilter, isSkippable, isInSkippable, skipSetFor } from './dom-stripper.js'
 
 const NS = {
     XML: 'http://www.w3.org/XML/1998/namespace',
@@ -98,7 +98,7 @@ const fragmentToSSML = (fragment, inherited) => {
     return ssml
 }
 
-const getFragmentWithMarks = (range, textWalker, granularity) => {
+const getFragmentWithMarks = (range, textWalker, granularity, skipSet, narrationFilter) => {
     const lang = getLang(range.commonAncestorContainer)
     const alphabet = getAlphabet(range.commonAncestorContainer)
 
@@ -109,7 +109,7 @@ const getFragmentWithMarks = (range, textWalker, granularity) => {
     // unwraps the range's boundary element, so the element itself is absent
     // from the fragment and the per-element prune below cannot see it.
     // Detect it on the live range and drop the whole block.
-    if (isInSkippable(range.startContainer))
+    if (isInSkippable(range.startContainer, skipSet))
         return { entries: [], ssml: fragmentToSSML(
             document.implementation.createDocument(NS.SSML, 'speak'),
             { lang, alphabet }) }
@@ -120,7 +120,7 @@ const getFragmentWithMarks = (range, textWalker, granularity) => {
     // nodes must go too.
     for (const el of [...fragment.querySelectorAll('*')]) {
         const name = el.tagName.toLowerCase()
-        if (name === 'script' || name === 'style' || isSkippable(el)) el.remove()
+        if (name === 'script' || name === 'style' || isSkippable(el, skipSet)) el.remove()
     }
 
     // we need ranges on both the original document (for highlighting)
@@ -228,11 +228,16 @@ export class TTS {
     #ranges
     #lastMark
     #serializer = new XMLSerializer()
-    constructor(doc, textWalker, highlight, granularity) {
+    constructor(doc, textWalker, highlight, granularity, { readNotes = false } = {}) {
         this.doc = doc
         this.highlight = highlight
+        // the set of roles left out of narration; "meat only" unless the
+        // reader opted into footnotes/endnotes
+        const skipSet = skipSetFor({ readNotes })
+        const narrationFilter = makeNarrationFilter(skipSet)
         this.#list = new ListIterator(getBlocks(doc), range => {
-            const { entries, ssml } = getFragmentWithMarks(range, textWalker, granularity)
+            const { entries, ssml } = getFragmentWithMarks(range, textWalker,
+                granularity, skipSet, narrationFilter)
             this.#ranges = new Map(entries)
             return [ssml, range]
         })

@@ -332,39 +332,73 @@ export const extractNodeRoles = el => {
     return roles
 }
 
-// Roles a reading system may leave out of read-aloud, per
-// https://github.com/readium/guided-navigation/blob/main/roles.md. Examples:
-// footnote/endnote asides, noteref superscripts, pagebreak labels, and
-// navigational lists. They are secondary or navigational content a human
-// reading aloud would not voice.
+// Roles left out of read-aloud by default. Mirrors @readium/speech's
+// `skippableRoles` (itself the roles.md list, extended with the structural
+// roles a data table / figure read cell-by-cell would turn to soup), plus
+// `noteref` markers and `pagebreak` labels, which are visual-only in every
+// mode. A reading system passes a subset — see skipSetFor().
 export const skippableRoles = new Set([
     // ancillary content
-    'aside', 'bibliography', 'details', 'endnotes',
-    'footnote', 'noteref', 'pullquote',
+    'aside', 'audio', 'bibliography', 'details', 'endnotes', 'figure',
+    'footnote', 'glossary', 'image', 'noteref', 'pullquote', 'video',
+    // structural (read cell-by-cell is unintelligible)
+    'table', 'row', 'cell', 'columnheader', 'rowheader',
     // navigation
     'landmarks', 'loa', 'loi', 'lot', 'lov', 'pagebreak', 'toc',
 ])
 
-export const isSkippable = el =>
-    extractNodeRoles(el).some(role => skippableRoles.has(role))
+// Roles the "read footnotes" preference controls: dropped from the skip set
+// (so notes are read, in DOM order) when the reader opts in. The noteref
+// marker itself is never read, either way.
+export const noteRoles = ['footnote', 'endnotes']
+
+// The skip set for a run. readNotes=false is "meat only" (the default).
+export const skipSetFor = ({ readNotes = false } = {}) => {
+    const set = new Set(skippableRoles)
+    if (readNotes) for (const role of noteRoles) set.delete(role)
+    return set
+}
+
+// A role another one on the same node carries drops — Readium's
+// roleDropOverrides. Without it a `<aside epub:type="footnote">` would stay
+// skippable as an `aside` even when the reader opted into reading footnotes.
+const roleDrops = {
+    footnote: ['aside'],
+    cover: ['image'],
+    pullquote: ['blockquote', 'aside'],
+    epigraph: ['blockquote'],
+}
+const droppedRoles = roles => {
+    const dropped = new Set()
+    for (const role of roles)
+        for (const d of roleDrops[role] ?? []) dropped.add(d)
+    return dropped
+}
+
+export const isSkippable = (el, skipSet = skippableRoles) => {
+    const roles = extractNodeRoles(el)
+    const dropped = droppedRoles(roles)
+    return roles.some(role => skipSet.has(role) && !dropped.has(role))
+}
 
 // Whether a node is, or is inside, skippable content (walks the ancestor
 // chain). Needed where a range/clone boundary unwraps the element itself, so
 // isSkippable(el) cannot be checked on it directly.
-export const isInSkippable = node => {
+export const isInSkippable = (node, skipSet = skippableRoles) => {
     const start = node?.nodeType === 1 ? node : node?.parentElement
     for (let el = start; el; el = el.parentElement)
-        if (isSkippable(el)) return true
+        if (isSkippable(el, skipSet)) return true
     return false
 }
 
-// A TreeWalker acceptNode for narration: reject skippable elements (pruning
-// their whole subtree) and script/style, so footnotes, noteref markers and
-// pagebreak labels never reach the synthesizer. Everything else is walked
-// (elements skipped, their text accepted) exactly like the default filter.
-export const narrationFilter = node => {
+// A TreeWalker acceptNode factory for narration: reject skippable elements
+// (pruning their whole subtree) and script/style, so footnotes, noteref
+// markers and pagebreak labels never reach the synthesizer. Everything else
+// is walked (elements skipped, their text accepted) exactly like the default
+// filter.
+export const makeNarrationFilter = (skipSet = skippableRoles) => node => {
     if (node.nodeType !== 1) return NodeFilter.FILTER_ACCEPT
     const name = node.tagName.toLowerCase()
     if (name === 'script' || name === 'style') return NodeFilter.FILTER_REJECT
-    return isSkippable(node) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP
+    return isSkippable(node, skipSet) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP
 }
