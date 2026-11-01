@@ -234,6 +234,7 @@ export class TTS {
     #list
     #ranges
     #fragment
+    #wordRanges
     #lastMark
     #serializer = new XMLSerializer()
     constructor(doc, textWalker, highlight, granularity, { readNotes = false } = {}) {
@@ -245,6 +246,9 @@ export class TTS {
         const narrationFilter = makeNarrationFilter(skipSet)
         this.#fragment = range => getFragmentWithMarks(range, textWalker,
             granularity, skipSet, narrationFilter)
+        this.#wordRanges = range => textWalker(range,
+            getSegmenter(getLang(range.commonAncestorContainer) || 'en', 'word'),
+            narrationFilter)
         this.#list = new ListIterator(getBlocks(doc), range => {
             const { entries, ssml } = this.#fragment(range)
             this.#ranges = new Map(entries)
@@ -299,8 +303,19 @@ export class TTS {
             block.comparePoint(cursor.startContainer, cursor.startOffset) <= 0) ?? []
         if (!block) return
         const clipped = block.cloneRange()
-        if (clipped.comparePoint(cursor.startContainer, cursor.startOffset) === 0)
-            clipped.setStart(cursor.startContainer, cursor.startOffset)
+        if (clipped.comparePoint(cursor.startContainer, cursor.startOffset) === 0) {
+            let start = cursor
+            // A partial-word selection names the whole word, not its suffix.
+            for (const [, word] of this.#wordRanges(block)) {
+                if (word.comparePoint(cursor.startContainer, cursor.startOffset) === 0
+                    && !(word.endContainer === cursor.startContainer
+                        && word.endOffset === cursor.startOffset)) {
+                    start = word
+                    break
+                }
+            }
+            clipped.setStart(start.startContainer, start.startOffset)
+        }
         const { entries, ssml } = this.#fragment(clipped)
         this.#ranges = new Map(entries)
         return this.#serializer.serializeToString(ssml)
