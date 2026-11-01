@@ -1,9 +1,9 @@
 const walkRange = (range, walker) => {
     const nodes = []
     for (let node = walker.currentNode; node; node = walker.nextNode()) {
-        const compare = range.comparePoint(node, 0)
-        if (compare === 0) nodes.push(node)
-        else if (compare > 0) break
+        if (node.nodeType !== 3 && node.nodeType !== 4) continue
+        if (range.comparePoint(node, 0) > 0) break
+        if (range.comparePoint(node, node.length) >= 0) nodes.push(node)
     }
     return nodes
 }
@@ -32,14 +32,15 @@ export const textWalker = function* (x, func, filterFunc) {
     const walker = document.createTreeWalker(root, filter, { acceptNode: filterFunc || acceptNode })
     const walk = x.commonAncestorContainer ? walkRange : walkDocument
     const nodes = walk(x, walker)
-    // nodeValue is null for element nodes that wind up in `nodes` (the walk
-    // range can include the block root); join() already treats them as empty,
-    // but the segmenter reads `.length`, so normalise to '' here
-    const strs = nodes.map(node => node.nodeValue ?? '')
+    // A range may begin or end inside a text node. Segment only its selected
+    // portion, then add the original offset back when creating DOM ranges.
+    const starts = nodes.map(node => x.startContainer === node ? x.startOffset : 0)
+    const strs = nodes.map((node, i) => node.nodeValue?.slice(starts[i],
+        x.endContainer === node ? x.endOffset : undefined) ?? '')
     const makeRange = (startIndex, startOffset, endIndex, endOffset) => {
         const range = document.createRange()
-        range.setStart(nodes[startIndex], startOffset)
-        range.setEnd(nodes[endIndex], endOffset)
+        range.setStart(nodes[startIndex], startOffset + starts[startIndex])
+        range.setEnd(nodes[endIndex], endOffset + starts[endIndex])
         return range
     }
     for (const match of func(strs, makeRange)) yield match

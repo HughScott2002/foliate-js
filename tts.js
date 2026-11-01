@@ -233,6 +233,7 @@ class ListIterator {
 export class TTS {
     #list
     #ranges
+    #fragment
     #lastMark
     #serializer = new XMLSerializer()
     constructor(doc, textWalker, highlight, granularity, { readNotes = false } = {}) {
@@ -242,9 +243,10 @@ export class TTS {
         // reader opted into footnotes/endnotes
         const skipSet = skipSetFor({ readNotes })
         const narrationFilter = makeNarrationFilter(skipSet)
+        this.#fragment = range => getFragmentWithMarks(range, textWalker,
+            granularity, skipSet, narrationFilter)
         this.#list = new ListIterator(getBlocks(doc), range => {
-            const { entries, ssml } = getFragmentWithMarks(range, textWalker,
-                granularity, skipSet, narrationFilter)
+            const { entries, ssml } = this.#fragment(range)
             this.#ranges = new Map(entries)
             return [ssml, range]
         })
@@ -291,15 +293,17 @@ export class TTS {
     }
     from(range) {
         this.#lastMark = null
-        const [doc] = this.#list.find(range_ =>
-            range.compareBoundaryPoints(Range.END_TO_START, range_) <= 0)
-        let mark
-        for (const [name, range_] of this.#ranges.entries())
-            if (range.compareBoundaryPoints(Range.START_TO_START, range_) <= 0) {
-                mark = name
-                break
-            }
-        return this.#speak(doc, ssml => this.#getMarkElement(ssml, mark))
+        const cursor = range.cloneRange()
+        cursor.collapse(true)
+        const [, block] = this.#list.find(block =>
+            block.comparePoint(cursor.startContainer, cursor.startOffset) <= 0) ?? []
+        if (!block) return
+        const clipped = block.cloneRange()
+        if (clipped.comparePoint(cursor.startContainer, cursor.startOffset) === 0)
+            clipped.setStart(cursor.startContainer, cursor.startOffset)
+        const { entries, ssml } = this.#fragment(clipped)
+        this.#ranges = new Map(entries)
+        return this.#serializer.serializeToString(ssml)
     }
     setMark(mark) {
         const range = this.#ranges.get(mark)
