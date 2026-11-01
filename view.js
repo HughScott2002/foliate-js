@@ -312,8 +312,17 @@ export class View extends HTMLElement {
     async init({ lastLocation, showTextStart }) {
         const resolved = lastLocation ? this.resolveNavigation(lastLocation) : null
         if (resolved) {
-            await this.renderer.goTo(resolved)
-            this.history.pushState(lastLocation)
+            try {
+                await this.renderer.goTo(resolved)
+                this.history.pushState(lastLocation)
+            } catch (e) {
+                console.warn(`Could not restore saved location ${lastLocation}: ${e}`)
+                if (Number.isInteger(resolved.index)
+                    && resolved.index >= 0 && resolved.index < this.book.sections.length) {
+                    await this.renderer.goTo({ index: resolved.index })
+                    this.history.pushState(resolved.index)
+                } else await this.goToTextStart()
+            }
         }
         else if (showTextStart) await this.goToTextStart()
         else {
