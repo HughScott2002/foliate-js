@@ -443,6 +443,7 @@ export class Paginator extends HTMLElement {
     #styles
     #styleMap = new WeakMap()
     #prepared = new Map()
+    #narrationIndex = null
     #prepareQueue = Promise.resolve()
     #mediaQuery = matchMedia('(prefers-color-scheme: dark)')
     #mediaQueryListener
@@ -725,7 +726,8 @@ export class Paginator extends HTMLElement {
         return entry.promise
     }
     #reconcilePrepared() {
-        const wanted = new Set([this.#adjacentIndex(1), this.#adjacentIndex(-1)])
+        const wanted = new Set([this.#adjacentIndex(1), this.#adjacentIndex(-1),
+            this.#narrationIndex])
         for (const [index, entry] of this.#prepared) {
             if (wanted.has(index)) continue
             this.#prepared.delete(index)
@@ -739,6 +741,16 @@ export class Paginator extends HTMLElement {
         for (const index of wanted) if (index != null) this.#prepare(index)
     }
     getPreparedContents(index) { return this.#prepared.get(index)?.view?.document ?? null }
+    async prepareNarrationContents(index) {
+        this.#narrationIndex = index
+        this.#reconcilePrepared()
+        if (index === this.#index) return this.#view.document
+        return this.#prepare(index)
+    }
+    releaseNarrationContents() {
+        this.#narrationIndex = null
+        this.#reconcilePrepared()
+    }
     #beforeRender({ vertical, rtl, background }) {
         this.#vertical = vertical
         this.#rtl = rtl
