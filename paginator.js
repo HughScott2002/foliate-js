@@ -236,7 +236,7 @@ class View {
         Object.assign(this.#iframe.style, {
             overflow: 'hidden',
             border: '0',
-            display: 'none',
+            visibility: 'hidden',
             width: '100%', height: '100%',
         })
         // `allow-scripts` is needed for events because of WebKit bug
@@ -250,37 +250,36 @@ class View {
     get document() {
         return this.#iframe.contentDocument
     }
-    async load(src, afterLoad, beforeRender) {
+    async preload(src) {
         if (typeof src !== 'string') throw new Error(`${src} is not string`)
         return new Promise(resolve => {
-            this.#iframe.addEventListener('load', () => {
-                const doc = this.document
-                afterLoad?.(doc)
-
-                // it needs to be visible for Firefox to get computed style
-                this.#iframe.style.display = 'block'
-                const { vertical, rtl } = getDirection(doc)
-                const background = getBackground(doc)
-                this.#iframe.style.display = 'none'
-
-                this.#vertical = vertical
-                this.#rtl = rtl
-
-                this.#contentRange.selectNodeContents(doc.body)
-                const layout = beforeRender?.({ vertical, rtl, background })
-                this.#iframe.style.display = 'block'
-                this.render(layout)
-                this.#observer.observe(doc.body)
-
-                // the resize observer above doesn't work in Firefox
-                // (see https://bugzilla.mozilla.org/show_bug.cgi?id=1832939)
-                // until the bug is fixed we can at least account for font load
-                doc.fonts.ready.then(() => this.expand())
-
-                resolve()
-            }, { once: true })
+            this.#iframe.addEventListener('load', resolve, { once: true })
             this.#iframe.src = src
         })
+    }
+    activate(afterLoad, beforeRender) {
+        const doc = this.document
+        afterLoad?.(doc)
+
+        // The iframe stays in layout while hidden, so Firefox can read its
+        // computed style and WebKit keeps the current page zoom.
+        const { vertical, rtl } = getDirection(doc)
+        const background = getBackground(doc)
+        this.#vertical = vertical
+        this.#rtl = rtl
+
+        this.#contentRange.selectNodeContents(doc.body)
+        const layout = beforeRender?.({ vertical, rtl, background })
+        this.render(layout)
+        this.#iframe.style.visibility = 'visible'
+        this.#observer.observe(doc.body)
+
+        // ResizeObserver does not work in Firefox for this body.
+        doc.fonts.ready.then(() => this.expand())
+    }
+    async load(src, afterLoad, beforeRender) {
+        await this.preload(src)
+        this.activate(afterLoad, beforeRender)
     }
     render(layout) {
         if (!layout) return
@@ -416,7 +415,7 @@ class View {
         return this.#overlayer
     }
     destroy() {
-        if (this.document) this.#observer.unobserve(this.document.body)
+        if (this.document?.body) this.#observer.unobserve(this.document.body)
     }
 }
 
@@ -443,6 +442,8 @@ export class Paginator extends HTMLElement {
     #locked = false // while true, prevent any further navigation
     #styles
     #styleMap = new WeakMap()
+    #prepared = new Map()
+    #prepareQueue = Promise.resolve()
     #mediaQuery = matchMedia('(prefers-color-scheme: dark)')
     #mediaQueryListener
     #scrollBounds
@@ -507,6 +508,7 @@ export class Paginator extends HTMLElement {
             grid-column: 2 / 5;
             grid-row: 2;
             overflow: hidden;
+            position: relative;
         }
         :host([flow="scrolled"]) #container {
             grid-column: 1 / -1;
@@ -663,18 +665,80 @@ export class Paginator extends HTMLElement {
                     `break-${x}: ${y ?? ''}column`))
         })
     }
-    #createView() {
-        if (this.#view) {
-            this.#view.destroy()
-            this.#container.removeChild(this.#view.element)
-        }
-        this.#view = new View({
+    #makeView() {
+        const view = new View({
             container: this,
-            onExpand: () => this.#scrollToAnchor(this.#anchor),
+            onExpand: () => {
+                if (this.#view === view && view.element.style.visibility !== 'hidden')
+                    this.#scrollToAnchor(this.#anchor)
+            },
         })
-        this.#container.append(this.#view.element)
-        return this.#view
+        // `visibility` preserves layout, including WebKit's current zoom.
+        view.element.style.visibility = 'hidden'
+        return view
     }
+    #createView() {
+        // Keep the old chapter painted while the new frame loads and lays out.
+        const previous = this.#view
+        previous?.destroy()
+        this.#view = this.#makeView()
+        this.#container.append(this.#view.element)
+        return { view: this.#view, previous }
+    }
+    #prepare(index) {
+        if (!this.#canGoToIndex(index) || index === this.#index) return Promise.resolve(null)
+        const cached = this.#prepared.get(index)
+        if (cached) return cached.promise
+        const section = this.sections[index]
+        const entry = { cancelled: false, view: null, promise: null }
+        entry.promise = this.#prepareQueue.then(async () => {
+            let src, view, keep = false
+            try {
+                if (entry.cancelled) return null
+                src = await section.load()
+                if (!src || entry.cancelled) return null
+                view = this.#makeView()
+                Object.assign(view.element.style, {
+                    position: 'absolute', top: '0', left: '0',
+                })
+                this.#container.append(view.element)
+                await view.preload(src)
+                if (entry.cancelled) return null
+                entry.view = view
+                keep = true
+                return view.document
+            } catch (e) {
+                console.warn(new Error(`Failed to prepare section ${index}`, { cause: e }))
+                return null
+            } finally {
+                if (!keep) {
+                    view?.destroy()
+                    view?.element.remove()
+                    if (src) section.unload?.()
+                    if (this.#prepared.get(index) === entry)
+                        this.#prepared.delete(index)
+                }
+            }
+        })
+        this.#prepareQueue = entry.promise.then(() => {}, () => {})
+        this.#prepared.set(index, entry)
+        return entry.promise
+    }
+    #reconcilePrepared() {
+        const wanted = new Set([this.#adjacentIndex(1), this.#adjacentIndex(-1)])
+        for (const [index, entry] of this.#prepared) {
+            if (wanted.has(index)) continue
+            this.#prepared.delete(index)
+            entry.cancelled = true
+            if (entry.view) {
+                entry.view.destroy()
+                entry.view.element.remove()
+                this.sections[index].unload?.()
+            }
+        }
+        for (const index of wanted) if (index != null) this.#prepare(index)
+    }
+    getPreparedContents(index) { return this.#prepared.get(index)?.view?.document ?? null }
     #beforeRender({ vertical, rtl, background }) {
         this.#vertical = vertical
         this.#rtl = rtl
@@ -969,11 +1033,23 @@ export class Paginator extends HTMLElement {
         this.dispatchEvent(new CustomEvent('relocate', { detail }))
     }
     async #display(promise) {
-        const { index, src, anchor, onLoad, select } = await promise
+        const { index, src, preparedView, anchor, onLoad, select, transition } = await promise
+        const oldVertical = this.#vertical
+        const oldScrollProp = this.scrollProp
+        const oldOffset = this.#container[oldScrollProp]
         this.#index = index
         const hasFocus = this.#view?.document?.hasFocus()
-        if (src) {
-            const view = this.#createView()
+        let previous
+        if (src || preparedView) {
+            const created = preparedView
+                ? { view: preparedView, previous: this.#view }
+                : this.#createView()
+            const { view } = created
+            previous = created.previous
+            if (preparedView) {
+                previous?.destroy()
+                this.#view = view
+            }
             const afterLoad = doc => {
                 if (doc.head) {
                     const $styleBefore = doc.createElement('style')
@@ -985,7 +1061,8 @@ export class Paginator extends HTMLElement {
                 onLoad?.({ doc, index })
             }
             const beforeRender = this.#beforeRender.bind(this)
-            await view.load(src, afterLoad, beforeRender)
+            if (preparedView) view.activate(afterLoad, beforeRender)
+            else await view.load(src, afterLoad, beforeRender)
             this.dispatchEvent(new CustomEvent('create-overlayer', {
                 detail: {
                     doc: view.document, index,
@@ -996,22 +1073,61 @@ export class Paginator extends HTMLElement {
         }
         await this.scrollToAnchor((typeof anchor === 'function'
             ? anchor(this.#view.document) : anchor) ?? 0, select)
+        if (transition && previous && !oldVertical && !this.#vertical) {
+            const view = this.#view.element
+            const old = previous.element
+            // Anchoring the new chapter changes the shared scroll offset.
+            // Counter that change so the old page stays still until it turns.
+            const shift = this.#container[oldScrollProp] - oldOffset
+            const distance = this.size * transition * (this.#rtl ? -1 : 1)
+            view.style.position = 'absolute'
+            view.style.top = '0'
+            view.style.left = '0'
+            old.style.transform = `translateX(${shift}px)`
+            view.style.transform = `translateX(${distance}px)`
+            view.style.visibility = 'visible'
+            await animate(0, 1, 300, easeOutQuad, progress => {
+                old.style.transform = `translateX(${shift - distance * progress}px)`
+                view.style.transform = `translateX(${distance * (1 - progress)}px)`
+            })
+            old.remove()
+            view.style.removeProperty('position')
+            view.style.removeProperty('top')
+            view.style.removeProperty('left')
+            view.style.removeProperty('transform')
+        } else {
+            previous?.element.remove()
+            this.#view.element.style.removeProperty('position')
+            this.#view.element.style.removeProperty('top')
+            this.#view.element.style.removeProperty('left')
+            this.#view.element.style.visibility = 'visible'
+        }
         if (hasFocus) this.focusView()
+        this.#reconcilePrepared()
     }
     #canGoToIndex(index) {
         return index >= 0 && index <= this.sections.length - 1
     }
-    async #goTo({ index, anchor, select}) {
+    async #goTo({ index, anchor, select, transition }) {
         if (index === this.#index) await this.#display({ index, anchor, select })
         else {
             const oldIndex = this.#index
+            const prepared = this.#prepared.get(index)
+            if (prepared) this.#prepared.delete(index)
             const onLoad = detail => {
                 this.sections[oldIndex]?.unload?.()
                 this.setStyles(this.#styles)
                 this.dispatchEvent(new CustomEvent('load', { detail }))
             }
-            await this.#display(Promise.resolve(this.sections[index].load())
-                .then(src => ({ index, src, anchor, onLoad, select }))
+            const load = prepared
+                ? prepared.promise.then(doc => doc
+                    ? { preparedView: prepared.view }
+                    : this.#prepareQueue.then(() => this.sections[index].load())
+                        .then(src => ({ src })))
+                : this.#prepareQueue.then(() => this.sections[index].load())
+                    .then(src => ({ src }))
+            await this.#display(Promise.resolve(load)
+                .then(x => ({ index, ...x, anchor, onLoad, select, transition }))
                 .catch(e => {
                     console.warn(e)
                     console.warn(new Error(`Failed to load section ${index}`))
@@ -1060,14 +1176,30 @@ export class Paginator extends HTMLElement {
     async #turnPage(dir, distance) {
         if (this.#locked) return
         this.#locked = true
-        const prev = dir === -1
-        const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
-        if (shouldGo) await this.#goTo({
-            index: this.#adjacentIndex(dir),
-            anchor: prev ? () => 1 : () => 0,
-        })
-        if (shouldGo || !this.hasAttribute('animated')) await wait(100)
-        this.#locked = false
+        try {
+            const prev = dir === -1
+            const adjacent = this.#adjacentIndex(dir)
+            const atBoundary = !this.scrolled && this.#view && adjacent != null
+                && (prev ? this.page <= 1 : this.page >= this.pages - 2)
+            if (atBoundary) {
+                // Turn directly into the next chapter instead of scrolling
+                // through the empty boundary page.
+                await this.#goTo({
+                    index: adjacent,
+                    anchor: prev ? () => 1 : () => 0,
+                    transition: this.hasAttribute('animated') ? dir : null,
+                })
+                return
+            }
+            const shouldGo = await (prev ? this.#scrollPrev(distance) : this.#scrollNext(distance))
+            if (shouldGo) await this.#goTo({
+                index: adjacent,
+                anchor: prev ? () => 1 : () => 0,
+            })
+            if (shouldGo || !this.hasAttribute('animated')) await wait(100)
+        } finally {
+            this.#locked = false
+        }
     }
     prev(distance) {
         return this.#turnPage(-1, distance)
@@ -1119,6 +1251,15 @@ export class Paginator extends HTMLElement {
         this.#view.document.defaultView.focus()
     }
     destroy() {
+        for (const [index, entry] of this.#prepared) {
+            entry.cancelled = true
+            if (entry.view) {
+                entry.view.destroy()
+                entry.view.element.remove()
+                this.sections[index].unload?.()
+            }
+        }
+        this.#prepared.clear()
         this.#observer.unobserve(this)
         this.#view.destroy()
         this.#view = null
